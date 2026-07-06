@@ -424,3 +424,45 @@ Hermes 的复杂度主要来自“多入口 + 多平台 + 长生命周期”。T
 ### Tool Search 和 Tool Registry 是什么关系？
 
 Tool Registry 是全量工具目录。Tool Search 是渐进式披露机制，用来在工具很多时先隐藏部分工具，只让模型通过搜索发现和调用。即使走 Tool Search bridge，也必须受到当前 session toolsets 的范围限制，不能绕过权限边界。
+
+### 用户说“继续”时，会不会触发某个工具？
+
+通常不会。“继续”首先是一条普通 user message，不是 tool call，也不是 registry 里的某个工具。
+
+它能让模型接着做，是因为当前 turn 的 `messages` 里已经带着前面的对话历史。`agent/turn_context.py` 会先复制 `conversation_history`，再把本轮用户消息追加进去：
+
+```python
+messages = list(conversation_history) if conversation_history else []
+...
+messages.append({"role": "user", "content": user_message})
+```
+
+所以模型看到的不是孤零零的“继续”，而是：
+
+```text
+前面的用户请求
+前面的 assistant 回复
+前面的 tool call / tool result
+用户：继续
+```
+
+这也解释了为什么它不属于 Tool Registry 的职责。Registry 负责“工具是否存在、是否暴露、如何派发”；“继续”属于对话上下文管理，主要依赖 `conversation_history`、SessionDB、resume 和 context compression。
+
+如果用户退出后再用 `hermes --continue` 或 `hermes --resume <session_id>`，Hermes 会从 SessionDB 恢复历史消息，填回 `conversation_history`。下一轮仍然走同一条路径：历史消息先进入 `messages`，新的“继续”再追加到尾部。
+
+当历史太长时，Context Compression 会把中间内容压成摘要，同时保留最近尾部。此时“继续”的语义来自：
+
+```text
+压缩摘要 + 最近几轮原文 + 当前用户消息
+```
+
+这个边界要记清楚：
+
+| 能力 | 负责什么 |
+| --- | --- |
+| Tool Registry | 工具注册、查询、最后派发 |
+| Toolsets | 当前 session 允许哪些工具暴露给模型 |
+| conversation_history | 当前会话的直接上下文 |
+| SessionDB | 会话持久化、resume、session_search 的数据来源 |
+| Context Compression | 历史太长时保留可继续工作的摘要和尾部 |
+| Memory | 长期偏好和稳定事实，不应该主要保存“任务做到哪一步” |
