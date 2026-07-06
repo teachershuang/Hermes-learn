@@ -454,30 +454,6 @@ Codex 和 Claude Code 也会做工具名、参数和权限检查。区别在于 
 6. Hermes 会先持久化 assistant tool-call turn，再执行工具，避免中途崩溃后丢上下文。
 7. 工具执行后不是直接结束，而是把结果回填 messages，再让模型继续判断。
 
-## 小实验
-
-在 Hermes 源码仓库里运行：
-
-```powershell
-rg -n "def run_conversation|build_turn_context|while \\(|assistant_message.tool_calls|_execute_tool_calls|IterationBudget" agent run_agent.py
-```
-
-你要能对应上：
-
-- `build_turn_context`：本轮准备。
-- `while (...)`：主循环边界。
-- `IterationBudget`：预算消耗。
-- `assistant_message.tool_calls`：工具分支。
-- `_execute_tool_calls`：工具执行入口。
-
-再定位工具执行：
-
-```powershell
-rg -n "def _execute_tool_calls|def invoke_tool|handle_function_call" run_agent.py agent model_tools.py
-```
-
-你会看到 tool call 从 agent loop 进入 runtime helper，再进入 `model_tools.handle_function_call`。
-
 ## QA
 
 ### 为什么 Hermes 不直接在模型返回 tool call 后执行？
@@ -495,3 +471,34 @@ rg -n "def _execute_tool_calls|def invoke_tool|handle_function_call" run_agent.p
 ### 这和普通 ReAct loop 有什么关系？
 
 普通 ReAct loop 是“思考 -> 行动 -> 观察 -> 再思考”。Hermes 的主循环也符合这个形态，但工程上多了很多保护：消息修复、provider 适配、工具校验、持久化、预算、中断、压缩和 guardrails。论文里的 loop 是思想模型，Hermes 这里是生产 runtime。
+
+### tool call 和单个工具执行有什么区别？
+
+`tool call` 是模型输出里的调用请求。它描述“我要调用哪个工具、参数是什么”。一个 assistant message 里可以有一个 tool call，也可以有多个 tool calls。
+
+单个工具执行是 Hermes runtime 接到某个 tool call 后，真正去跑对应 handler 的过程。它会经过校验、middleware、插件阻断、内置工具分流或 registry 分发。
+
+简单说：
+
+```text
+tool call = 模型提出的请求
+单个工具执行 = Hermes 对其中一个请求的实际执行
+```
+
+所以一轮模型响应可能是：
+
+```text
+assistant_message.tool_calls = [read_file(...), session_search(...), memory(...)]
+```
+
+Hermes 会先处理这一批 tool calls，再把每一个工具的结果分别追加为 tool message。
+
+### Memory / Skill review 的触发时机讲了吗？
+
+这一篇只点到了“本轮结束后可能触发 memory / skill review”，还没有展开。这个问题要放到 Memory 和 Skills 章节里讲。
+
+先记住边界：`memory` 工具本身可以在 tool call 分支里被模型主动调用；而 memory review / skill review 更像 turn 结束后的后台整理逻辑，用来判断是否要沉淀长期记忆或技能。二者不是同一个时机。
+
+### 如果下一课先讲 Prompt Builder，tool call 分支还会回头讲吗？
+
+会。`tool call` 分支会单独深挖，因为它牵涉四个问题：一个 assistant message 可以有多个 tool calls、每个 tool call 如何变成单个工具执行、顺序和并发如何选择、tool result 如何回填并影响下一轮模型调用。
