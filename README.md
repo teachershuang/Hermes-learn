@@ -33,6 +33,9 @@ docs/
   modules/
     01-agent-loop.md
     02-prompt-builder.md
+    03-tool-registry-and-toolsets.md
+    04-tool-dispatch-and-failure.md
+    05-session-state-and-search.md
 ```
 
 ## 已完成内容
@@ -40,6 +43,9 @@ docs/
 - 全局架构地图：先建立 Hermes 的主线认知。
 - Agent Loop：一轮对话如何从用户输入推进到模型调用、工具调用和最终回复。
 - Prompt Builder：模型到底看到了什么，system prompt 如何分层、缓存、持久化。
+- Tool Registry 与 Toolsets：工具如何注册、分组、暴露给模型。
+- Tool Call 分支与失败处理：模型发起工具调用以后，Hermes 如何校验、执行、截断和回收结果。
+- SessionDB 与 session_search：会话如何持久化、恢复、压缩，并被模型按需检索。
 
 ## 后续主题
 
