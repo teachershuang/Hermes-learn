@@ -300,6 +300,108 @@ registry.register(
 
 这时才进入执行派发。
 
+### 工具可见性的完整判定链
+
+“当前 session 的模型能不能看见某个工具”，主要由 `model_tools.get_tool_definitions` 这条链判断：
+
+```text
+enabled_toolsets / disabled_toolsets
+        ↓
+toolsets.resolve_toolset(...)
+        ↓
+tools_to_include
+        ↓
+registry.get_definitions(...)
+        ↓
+check_fn 过滤
+        ↓
+dynamic schema 修正
+        ↓
+schema sanitizer
+        ↓
+Tool Search progressive disclosure
+        ↓
+最终传给模型的 tools 数组
+```
+
+具体判断分几步。
+
+第一步，看当前 session 启用了哪些 toolsets。源码在 `model_tools.py`：
+
+```python
+if enabled_toolsets is not None:
+    for toolset_name in effective_enabled_toolsets:
+        resolved = resolve_toolset(toolset_name)
+        tools_to_include.update(resolved)
+else:
+    for ts_name in get_all_toolsets():
+        tools_to_include.update(resolve_toolset(ts_name))
+```
+
+如果显式传了 `enabled_toolsets`，就只从这些 toolsets 里取工具。否则走默认的全局 toolset 解析。
+
+第二步，再减去 `disabled_toolsets`：
+
+```python
+if disabled_toolsets:
+    for toolset_name in disabled_toolsets:
+        resolved = resolve_toolset(toolset_name)
+        tools_to_include.difference_update(resolved)
+```
+
+这一步很重要。即使某个工具被平台 bundle 带进来了，也可以通过 disabled toolsets 做减法。
+
+第三步，交给 registry 取 schema：
+
+```python
+filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+```
+
+`registry.get_definitions` 不是简单返回 schema。它会检查每个工具自己的 `check_fn`：
+
+```python
+if entry.check_fn:
+    if entry.check_fn not in check_results:
+        check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+    if not check_results[entry.check_fn]:
+        continue
+```
+
+所以工具可见性不是只看名字是否在 toolset 里。它至少要同时满足：
+
+```text
+工具已经注册到 registry
+工具名被当前 enabled toolsets 展开出来
+没有被 disabled toolsets 移除
+工具自己的 check_fn 通过
+schema 没有在动态修正中被移除
+没有被 Tool Search 延迟披露
+```
+
+第四步，Hermes 还会根据真正可用的工具修正部分 schema。
+
+例如 `execute_code` 的 schema 会只列出当前真的可用的 sandbox tools：
+
+```python
+available_tool_names = {t["function"]["name"] for t in filtered_tools}
+if "execute_code" in available_tool_names:
+    sandbox_enabled = SANDBOX_ALLOWED_TOOLS & available_tool_names
+    dynamic_schema = build_execute_code_schema(sandbox_enabled, mode=_get_execution_mode())
+```
+
+这解决的是“描述里说某工具可用，但模型实际不能调用”的问题。否则模型会被 schema 误导。
+
+第五步，Tool Search 可能把一部分 MCP / plugin 工具从完整 tools 数组里拿掉，换成 `tool_search / tool_describe / tool_call` 三个桥接工具。此时工具并不是彻底不可用，而是变成“需要先搜索，再描述，再桥接调用”。
+
+所以更准确地说，模型能不能看见工具有两种状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| 直接可见 | 工具 schema 直接在 `tools` 数组里 |
+| 延迟可见 | 工具被 Tool Search 收起，需要先通过 `tool_search` 发现 |
+
+如果一个工具既不在直接 tools 数组，也不在当前 session 的 Tool Search 范围里，那模型就不应该能调用它。
+
 ## 功能 6：`handle_function_call` 是执行前的关口
 
 ### 先讲人话
@@ -344,6 +446,170 @@ return registry.dispatch(
 ```
 
 这说明 Registry 是最终执行路由，但不是全部安全边界。真正的执行前控制大多在 `handle_function_call` 和更外层的 agent loop。
+
+### 执行前关口逐项解释
+
+`handle_function_call` 里那串步骤看起来杂，其实可以分成四类：修正模型输出、限制能力边界、接入插件扩展、保存可观测性。
+
+| 步骤 | 作用 | 为什么需要 |
+| --- | --- | --- |
+| 参数类型 coercion | 按工具 JSON Schema 修正参数类型 | 模型经常把 `42` 写成 `"42"`，把数组写成字符串 |
+| Tool Search bridge | 处理 `tool_search / tool_describe / tool_call` | 工具太多时渐进式披露，避免一次塞爆 tools 数组 |
+| tool request middleware | 在执行前改写工具参数 | 给插件或宿主一个“修改请求”的机会 |
+| `pre_tool_call` 阻断 | 插件可以拒绝某次工具调用 | 做安全策略、审计策略或平台限制 |
+| ACP / Zed 编辑审批 | 文件修改前请求宿主批准 | 编辑类工具不能绕过 IDE / ACP 的权限控制 |
+| read/search loop 计数重置 | 非读工具执行后重置连续读计数 | 防止模型陷入重复读文件 / 搜索的循环 |
+| 执行时间统计 | 记录工具耗时 | 给 post hook、日志、性能诊断使用 |
+| tool execution middleware | 包裹真实执行过程 | 插件可以做 tracing、重试、包装结果 |
+| `registry.dispatch` | 找到 handler 并执行 | 最后一跳，真正调用工具实现 |
+
+#### 参数类型 coercion
+
+模型输出的 tool arguments 不总是严格符合 schema。比如工具需要：
+
+```json
+{"limit": 5, "merge": true, "urls": ["https://example.com"]}
+```
+
+模型可能给：
+
+```json
+{"limit": "5", "merge": "true", "urls": "https://example.com"}
+```
+
+`coerce_tool_args` 会根据 registry 里的 schema 做安全修正：
+
+```python
+schema = registry.get_schema(tool_name)
+...
+coerced = _coerce_value(value, expected, schema=prop_schema)
+```
+
+它还会把 schema 期待数组、但模型给了单个值的情况包成单元素数组。这样能减少很多无意义的工具失败。
+
+#### Tool Search bridge
+
+Tool Search 是给 MCP / plugin 工具准备的渐进式披露机制。工具太多时，Hermes 不把所有工具 schema 直接给模型，而是给三个桥接工具：
+
+```text
+tool_search    搜索可用工具
+tool_describe  查看某个工具参数
+tool_call      调用被延迟披露的工具
+```
+
+但这里有一个安全点：`tool_call` 不能绕过当前 session 的 toolsets。
+
+源码里会重新用当前 `enabled_toolsets / disabled_toolsets` 生成 scoped catalog：
+
+```python
+current_defs = get_tool_definitions(
+    enabled_toolsets=enabled_toolsets,
+    disabled_toolsets=disabled_toolsets,
+    quiet_mode=True,
+    skip_tool_search_assembly=True,
+)
+```
+
+然后检查 underlying tool 是否在当前 session 允许的延迟工具集合里：
+
+```python
+if underlying_name not in _scoped_deferrable:
+    return json.dumps({"error": ...})
+```
+
+这一步防止受限 session 通过 `tool_call` 偷调全局 registry 里的工具。
+
+#### tool request middleware
+
+`tool_request` middleware 发生在工具真正执行前，用来改写参数：
+
+```python
+_tool_request_mw = apply_tool_request_middleware(...)
+function_args = _tool_request_mw.payload
+```
+
+它和 observer hook 不一样。observer 只是看见事件；middleware 可以改变事件。比如插件可以给某个工具参数补默认值、替换目标环境、加审计标记，或者把不合规参数改成安全版本。
+
+#### `pre_tool_call` 阻断
+
+`pre_tool_call` 是插件阻断点：
+
+```python
+block_message = get_pre_tool_call_block_message(...)
+if block_message is not None:
+    return json.dumps({"error": block_message}, ensure_ascii=False)
+```
+
+如果插件返回 block message，这次工具调用不会继续执行。它适合做策略阻断，例如某个平台不允许执行 shell，或者某类 URL / 路径需要拒绝。
+
+#### ACP / Zed 编辑审批
+
+这一步只在 ACP / Zed 这类宿主绑定了 requester 时生效：
+
+```python
+edit_block_message = maybe_require_edit_approval(function_name, function_args)
+if edit_block_message is not None:
+    return edit_block_message
+```
+
+如果工具是 `write_file`、`patch` 这类会改文件的操作，宿主可以先展示 diff，让用户或 IDE 批准。没有 requester 时，这一步直接跳过。
+
+#### read/search loop 计数重置
+
+Hermes 有读文件 / 搜索文件的循环防护。如果模型连续读同一类内容，系统需要识别它是不是陷入了“读了又读”的循环。
+
+但如果中间执行了其他工具，比如 patch、terminal、write_file，说明模型已经不只是重复读。于是执行非 read/search 工具时会重置计数：
+
+```python
+if function_name not in _READ_SEARCH_TOOLS:
+    notify_other_tool_call(task_id or "default")
+```
+
+这不是安全审批，而是行为模式纠偏。
+
+#### 执行时间统计和 post hook
+
+Hermes 会记录工具耗时：
+
+```python
+_dispatch_start = time.monotonic()
+...
+duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
+```
+
+耗时会传给后续 hook，用于日志、插件监控、性能诊断。比如某个 web 工具突然变慢，插件可以基于 duration 做告警或统计。
+
+#### tool execution middleware
+
+真正执行工具前，Hermes 还会把 dispatch 包进 execution middleware：
+
+```python
+result = run_tool_execution_middleware(
+    function_name,
+    function_args,
+    _dispatch,
+    original_args=_tool_original_args,
+)
+```
+
+这和 request middleware 的区别是：
+
+```text
+tool_request middleware：改参数
+tool_execution middleware：包住执行过程
+```
+
+execution middleware 可以做 tracing、超时包装、重试、结果加工，最后再调用 `next_call(args)` 进入真实 dispatch。
+
+#### 最后一跳：`registry.dispatch`
+
+前面的关口都过了，才到：
+
+```python
+return registry.dispatch(function_name, next_args, ...)
+```
+
+所以不要把 `registry.dispatch` 理解成整个工具系统。它只是最后一跳。真正复杂的工程边界在 dispatch 之前。
 
 ## 功能 7：`registry.dispatch` 只做最后一跳
 
