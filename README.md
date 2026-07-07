@@ -36,6 +36,7 @@ docs/
     03-tool-registry-and-toolsets.md
     04-tool-dispatch-and-failure.md
     05-session-state-and-search.md
+    06-context-compression.md
 ```
 
 ## 已完成内容
@@ -46,6 +47,7 @@ docs/
 - Tool Registry 与 Toolsets：工具如何注册、分组、暴露给模型。
 - Tool Call 分支与失败处理：模型发起工具调用以后，Hermes 如何校验、执行、截断和回收结果。
 - SessionDB 与 session_search：会话如何持久化、恢复、压缩，并被模型按需检索。
+- Context Compression：上下文太长以后，Hermes 如何触发压缩、生成摘要、保留尾部并接回会话状态。
 
 ## 后续主题
 
