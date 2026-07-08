@@ -37,6 +37,7 @@ docs/
     04-tool-dispatch-and-failure.md
     05-session-state-and-search.md
     06-context-compression.md
+    07-memory-system.md
 ```
 
 ## 已完成内容
@@ -48,6 +49,7 @@ docs/
 - Tool Call 分支与失败处理：模型发起工具调用以后，Hermes 如何校验、执行、截断和回收结果。
 - SessionDB 与 session_search：会话如何持久化、恢复、压缩，并被模型按需检索。
 - Context Compression：上下文太长以后，Hermes 如何触发压缩、生成摘要、保留尾部并接回会话状态。
+- Memory System：Hermes 如何保存用户偏好、环境事实，并通过内置文件、后台 review 和外部 provider 形成长期记忆。
 
 ## 后续主题
 
