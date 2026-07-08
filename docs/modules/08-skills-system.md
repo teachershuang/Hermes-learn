@@ -502,7 +502,7 @@ return {
 
 ## 功能 10：后台 Skill Review 什么时候介入
 
-你前面问过 Memory / Skill review 的介入时机。Memory 已经在上一讲讲过，这里补 skill 侧。
+前面问过 Memory / Skill review 的介入时机。Memory 已经在上一讲讲过，这里补 skill 侧。
 
 主循环每次工具迭代都会累加 `_iters_since_skill`。源码在 `agent/conversation_loop.py`：
 
@@ -908,7 +908,7 @@ Hermes 用 prompt 和工具保护尽量避免这个问题。review prompt 要求
 
 看偏好类型。
 
-“用户喜欢中文”适合 Memory。  
+“用户喜欢中文”适合 Memory。
 “写开源学习笔记时，每个功能后面必须跟源码和工程实现”更适合 skill 或项目指导，因为它是某类任务的方法。
 
 如果一个偏好会改变某类任务的执行步骤，就应该进入对应 skill。否则模型知道用户偏好，但具体做任务时仍可能按旧流程走。
