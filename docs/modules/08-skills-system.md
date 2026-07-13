@@ -1,6 +1,6 @@
 # Skills System：Hermes 怎么把“做事方法”沉淀下来
 
-## 这一讲先解决什么问题
+## 目标与范围
 
 Memory 记的是稳定事实。Skills 记的是做事方法。
 
@@ -17,7 +17,7 @@ Hermes 的 Skills System 解决的是这个问题：
   -> curator 和 usage 负责长期维护
 ```
 
-这一讲重点讲运行时主链。Skills Hub 的目录来源、网页索引和安装生态会在 CLI / 插件 / 生态章节里再展开。
+本章集中分析 Skills 的运行时主链。Skills Hub 的目录来源、网页索引和安装接口属于 CLI 与插件层，不在这里重复展开。
 
 ## 功能 1：Skill 不是普通 Markdown，而是可被 agent 发现的程序化记忆
 
@@ -104,7 +104,7 @@ Before replying, scan the skills below...
 </available_skills>
 ```
 
-真正重要的是这段强制行为指导：
+决定运行时行为的是下面这段指导：
 
 ```python
 "Before replying, scan the skills below. If a skill matches or is even partially relevant "
@@ -167,7 +167,7 @@ snapshot = _load_skills_snapshot(skills_dir)
 
 如果快照有效，就直接使用预解析 metadata。无效时才全量扫描 `SKILL.md`，然后写回 `.skills_prompt_snapshot.json`。这不是过早优化。Hermes 的 skill 数量一多，冷启动时反复读 YAML、解析 category、检查平台，成本会很明显。
 
-这里还体现了一个原则：system prompt 不是“每次随手拼字符串”。它是运行时性能、缓存命中、安全过滤和工具可用性的交汇点。Skills index 是 prompt 的一部分，所以它也要像工程模块一样被缓存、校验和失效。
+system prompt 不是每次调用时临时拼出的字符串。它同时影响运行时性能、缓存命中、安全过滤和工具可用性。Skills index 属于 prompt 的一部分，因此也需要明确的缓存、校验和失效规则。
 
 ## 功能 4：Skill 是否出现在索引里，不是只看文件存在
 
@@ -453,7 +453,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         return {"success": False, "error": scan_error}
 ```
 
-几个细节要记住：
+这里有几项执行约束：
 
 第一，先校验名称和 frontmatter。写入不合格的 `SKILL.md`，后续索引和 `skill_view` 都会变得不可预测。
 
@@ -496,7 +496,7 @@ return {
 }
 ```
 
-这是非常典型的 agent 工程设计：不要只告诉模型“失败了”，要给它足够信息让它自己修正下一次 tool call。
+错误结果不能只返回“失败”，还要提供足够信息供模型修正下一次 tool call。
 
 `edit` 是全量替换，风险更高。它适合结构性改写，但必须先读原 skill。后台 review 场景里，Hermes 还有 read-before-write guard，防止 review agent 没看文件就乱改。
 
@@ -551,7 +551,7 @@ if final_response and not interrupted and (_should_review_memory or _should_revi
     )
 ```
 
-注意顺序：先给用户返回 final response，再做 review。这样不会拖慢主任务。
+执行顺序是先返回 final response，再启动 review，避免后台整理增加主任务延迟。
 
 ## 功能 11：Skill Review 的 prompt 在教模型沉淀“类级别方法”
 
@@ -568,7 +568,7 @@ _SKILL_REVIEW_PROMPT = (
 )
 ```
 
-这里有一个很重要的判断：Hermes 不希望每次任务都生成一个小 skill。它希望 skill 是 class-level umbrella。也就是“这一类任务的方法”，而不是“今天这个 PR 的记录”。
+Hermes 不为每次任务都生成独立小 skill，而是将 skill 作为 class-level umbrella，记录“一类任务的方法”，而不是“某次 PR 的记录”。
 
 提示词给了优先级：
 
@@ -579,7 +579,7 @@ _SKILL_REVIEW_PROMPT = (
 4. 最后才创建新的 class-level skill
 ```
 
-这套顺序是为了防止技能库碎片化。否则后台 review 很快会把 skill 目录变成几百个一次性小文件。模型未来看到索引时，反而更难选。
+这套顺序用于限制技能库碎片化。缺少查重和更新步骤时，后台 review 会持续生成一次性小文件，随后降低索引的可选择性。
 
 Skill review 还明确说，用户对工作方式的纠正不只是 memory：
 
@@ -765,9 +765,9 @@ def _pinned_guard(name: str) -> Optional[str]:
 "will refuse ... Patches and edits go through on pinned skills so you can still improve them..."
 ```
 
-这个边界很细，但很重要。pin 的目的不是把 skill 冻结成只读，而是防止 curator 或模型把重要 skill 删掉、归档掉。一个 pinned skill 仍然可能有错误命令、过时步骤、缺少坑点，所以 patch/edit 应该允许。
+pin 的目的不是把 skill 冻结成只读，而是防止 curator 或模型将其删除或归档。pinned skill 仍可能包含错误命令、过时步骤或缺失信息，因此 patch/edit 仍然允许。
 
-如果把 pinned 理解为“完全不能改”，用户就会陷入一个坏状态：最重要的 skill 反而不能修。Hermes 把删除保护和内容改进分开，这是比较成熟的生命周期设计。
+`pinned` 不表示内容永久不可修改，否则高频使用的 skill 反而无法修正。Hermes 将删除保护与内容更新分开处理。
 
 ## 功能 16：插件技能为什么不进系统提示索引
 
@@ -809,7 +809,7 @@ system prompt 已经很大
 
 ## 功能 17：Memory、Skills、Session Search 的边界再收束一次
 
-上一讲已经讲过这张边界表，这一讲换成 skills 视角再看：
+从 Skills 的状态归属看，这张边界表可以写成：
 
 | 系统 | 存什么 | 怎么进入模型 |
 | --- | --- | --- |
@@ -919,11 +919,11 @@ Hermes 用 prompt 和工具保护尽量避免这个问题。review prompt 要求
 
 Memory 写入用 `tools/threat_patterns.py` 的 strict 规则，扫描一段将进入 system prompt 的文本。
 
-Skill 安装和写入用 `tools/skills_guard.py`，扫描的是一个技能目录。它不仅看 prompt injection 和外泄模式，还看文件结构、总大小、二进制、符号链接、`.skillignore`、来源信任和安装策略。
+Skill 安装和写入使用 `tools/skills_guard.py` 扫描整个技能目录。检查范围包括 prompt injection、外泄模式、文件结构、总大小、二进制、符号链接、`.skillignore`、来源信任和安装策略。
 
 Memory 是一段长期事实。Skill 是一个长期方法包。后者的攻击面更大。
 
-## 本讲要带走的主线
+## 实现要点
 
 Hermes 的 Skills System 是程序化记忆，不是简单提示词模板。
 
